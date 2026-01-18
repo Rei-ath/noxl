@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -20,6 +21,25 @@ USERS_ROOT = resolve_users_root()
 USER_META_FILENAME = "user.json"
 SESSION_SUBDIR = "sessions"
 DEFAULT_USER_ID = "default"
+DEFAULT_SESSION_CONTEXT_TURNS = 0
+
+
+def _read_positive_int(raw: object) -> int:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def _read_int_env(name: str) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def compute_title_from_messages(messages: List[Dict[str, Any]]) -> Optional[str]:
@@ -239,6 +259,65 @@ def load_session_messages(log_path: Path) -> List[Dict[str, Any]]:
     except FileNotFoundError:
         pass
     return messages
+
+
+def _trim_session_context(
+    messages: List[Dict[str, Any]],
+    *,
+    max_turns: int,
+    max_messages: int,
+) -> List[Dict[str, Any]]:
+    if not messages:
+        return []
+
+    system_msgs = [msg for msg in messages if msg.get("role") == "system"]
+    system_msg = system_msgs[:1]
+
+    if max_turns:
+        pairs = _group_user_assistant_pairs(messages)
+        if len(pairs) > max_turns:
+            pairs = pairs[-max_turns:]
+        dialogue = [msg for pair in pairs for msg in pair]
+    else:
+        dialogue = [msg for msg in messages if msg.get("role") != "system"]
+        if max_messages and len(dialogue) > max_messages:
+            dialogue = dialogue[-max_messages:]
+
+    return (system_msg + dialogue) if system_msg else dialogue
+
+
+def load_session_context(
+    log_path: Path,
+    *,
+    max_turns: Optional[int] = None,
+    max_messages: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Load a session and return a narrow context window."""
+
+    messages = load_session_messages(log_path)
+    if not messages:
+        return messages
+
+    if max_turns is None and max_messages is None:
+        env_turns = _read_int_env("NOX_SESSION_CONTEXT_TURNS")
+        env_messages = _read_int_env("NOX_SESSION_CONTEXT_MESSAGES")
+        if env_turns is not None:
+            max_turns = env_turns
+        if env_messages is not None:
+            max_messages = env_messages
+        if max_turns is None and max_messages is None:
+            max_turns = DEFAULT_SESSION_CONTEXT_TURNS
+
+    resolved_turns = _read_positive_int(max_turns) if max_turns is not None else 0
+    resolved_messages = _read_positive_int(max_messages) if max_messages is not None else 0
+    if not resolved_turns and not resolved_messages:
+        return messages
+
+    return _trim_session_context(
+        messages,
+        max_turns=resolved_turns,
+        max_messages=resolved_messages,
+    )
 
 
 def load_session_records(log_path: Path) -> List[Dict[str, Any]]:
